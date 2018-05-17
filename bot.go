@@ -50,7 +50,7 @@ var userLastSigninRequestBk = "lastSigninRequest"
 func main() {
 	//Set env value
 	botToken := "SIGNIN_BOT_TOKEN"
-	os.Setenv(botToken, "587498524:AAH5eMVzvxRU9pLy9hD3TY48hiQhi3QCSYs")
+	os.Setenv(botToken, "xxxxxxxxxxxxx")
 	//Setup log
 	log.SetFlags(log.LstdFlags | log.Llongfile)
 	//db setup
