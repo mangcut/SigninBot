@@ -1,13 +1,19 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"crypto/tls"
+	"net/http"
+
+	"github.com/boltdb/bolt"
 	tb "gopkg.in/tucnak/telebot.v2"
 )
 
@@ -33,11 +39,35 @@ type userInfo struct {
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 var userMap = make(map[int]*userInfo)
+var userBk = "userInfo"
+var userIdKey = "userId"
+var userDisplayNameKey = "displayName"
+var userTosAgreedBk = "tosAgreed"
+var userSubcriptionBk = "subcription"
+var userRegistrationStepBk = "registrationStep"
+var userLastSigninRequestBk = "lastSigninRequest"
 
 func main() {
+	//Set env value
+	botToken := "SIGNIN_BOT_TOKEN"
+	os.Setenv(botToken, "xxxxxxxxxxxxx")
+	//Setup log
+	log.SetFlags(log.LstdFlags | log.Llongfile)
+	//db setup
+	dbStorage := "my.db"
+	db, err := initDb(dbStorage)
+	db, err = initDbBucket(db, userBk)
+	defer db.Close()
+
+	//Create http client
+	transCfg := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //disable verify
+	}
+	client := &http.Client{Transport: transCfg}
 	b, err := tb.NewBot(tb.Settings{
-		Token:  os.Getenv("SIGNIN_BOT_TOKEN"),
+		Token:  os.Getenv(botToken),
 		Poller: &tb.LongPoller{Timeout: 10 * time.Second},
+		Client: client,
 	})
 
 	if err != nil {
@@ -270,4 +300,95 @@ func doCreateAccount(b *tb.Bot, m *tb.Message) {
 
 func informSignin(b *tb.Bot, m *tb.Message) {
 	send(b, m, "To sign-in Kyber Network, please type /signin")
+}
+
+func initDb(storage string) (*bolt.DB, error) {
+	log.Printf("Initialize boltdb!")
+	db, err := bolt.Open(storage, 0600, nil)
+	if err != nil {
+		log.Fatal(err)
+	} else {
+		log.Printf("DB is initialize successful to %s.", storage)
+	}
+	return db, err
+}
+
+func initDbBucket(db *bolt.DB, bucket string) (*bolt.DB, error) {
+	err := db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte(bucket))
+		if err != nil {
+			errStr := fmt.Errorf("Could not create bucket %s error: %s", bucket, err)
+			log.Print(errStr)
+			return errStr
+		}
+		/*
+		   _, err = rootBk.CreateBucketIfNotExists([]byte(userDisplayNameBk))
+		   if err != nil {
+		           errStr := fmt.Errorf("Could not create bucket %s error: %s", userDisplayNameBk, err)
+		           log.Print(errStr)
+		           return errStr
+		   }
+
+		   _, err = rootBk.CreateBucketIfNotExists([]byte(userTosAgreedBk))
+
+		   if err != nil {
+		           errStr := fmt.Errorf("Could not create bucket %s error: %s", userTosAgreedBk, err)
+		           log.Print(errStr)
+		           return errStr
+		   }
+
+		   _, err = rootBk.CreateBucketIfNotExists([]byte(userSubcriptionBk))
+
+		   if err != nil {
+		           errStr := fmt.Errorf("Could not create bucket %s error: %s", userSubcriptionBk, err)
+		           log.Print(errStr)
+		           return errStr
+		   }
+
+		   _, err = rootBk.CreateBucketIfNotExists([]byte(userRegistrationStepBk))
+
+		   if err != nil {
+		           errStr := fmt.Errorf("Could not create bucket %s error: %s", userRegistrationStepBk, err)
+		           log.Print(errStr)
+		           return errStr
+		   }
+
+		   _, err = rootBk.CreateBucketIfNotExists([]byte(userLastSigninRequestBk))
+
+		   if err != nil {
+		           errStr := fmt.Errorf("Could not create bucket %s error: %s", userLastSigninRequestBk, err)
+		           log.Print(errStr)
+		           return errStr
+		   }
+		*/
+		return nil
+	})
+	return db, err
+}
+func updateUserInfo(db *bolt.DB, user *userInfo, id int, bucket string) error {
+	err := db.Update(func(tx *bolt.Tx) error {
+		bk := tx.Bucket([]byte(bucket))
+		userBytes, err := json.Marshal(user)
+		if err == nil {
+			err = bk.Put([]byte(strconv.Itoa(id)), []byte(userBytes))
+			if err == nil {
+				log.Printf("Insert user id=%i to db successfully!", id)
+			}
+		}
+		return nil
+	})
+	return err
+}
+func getUserInfo(db *bolt.DB, id int, bucket string) userInfo {
+	userBytes := db.View(func(tx *bolt.Tx) (value []byte) {
+		bk := tx.Bucket([]byte(bucket))
+		value = bk.Get([]byte(strconv.Itoa(id)))
+		return value
+	})
+	var users []userInfo
+	json.Unmarshal(userBytes, &users)
+	if len(users) > 1 {
+		return users[0]
+	}
+	return nil
 }
