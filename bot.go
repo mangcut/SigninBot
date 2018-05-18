@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"errors"
+	"bytes"
 
 	"crypto/tls"
 	"net/http"
@@ -50,7 +51,7 @@ var defaultDbFileMode os.FileMode = 0600
 var defaultBucket = "userinfo"
 
 
-func test(){
+func testJsonMarshall(){
 	fmt.Printf("hello, world\n")
     var user userInfo
     user.DisplayName="test name"
@@ -89,6 +90,8 @@ func appInit(){
 	if tempValue == ""{
 		log.Fatal("I dont have the KEY to open the door! :(")
 	}
+
+	loadUserInfo(defaultBucket)
 }
 
 func initDb() (error) {
@@ -150,7 +153,10 @@ func updateUserInfo(user *userInfo, id int, bucket string) error {
 	defer db.Close()
 	return err
 }
-
+/*
+*
+*get user info by id from boltdb
+*/
 func getUserInfo(id int, bucket string) (userInfo, error) {
 	storage := os.Getenv(APP_ENV_DB_STORAGE)
 	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
@@ -173,13 +179,43 @@ func getUserInfo(id int, bucket string) (userInfo, error) {
 	})
 	return user, err
 }
+/*
+*load all user info from bolt db
+*/
+func loadUserInfo(bucket string) error {
+	log.Printf("loadUserInfo: loading user info")
+	storage := os.Getenv(APP_ENV_DB_STORAGE)
+	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// var allUsers []userInfo
+	err = db.View(func(tx *bolt.Tx) error {
+		bk := tx.Bucket([]byte(bucket))
+		bk.ForEach(func(key, value []byte) error{
+			log.Printf("Load user id=%s value=%s", key, value)
+			var tempUser userInfo
+			json.Unmarshal(value, &tempUser)
 
+			fmt.
+
+			log.Printf("key value %s -- ", stringbyte)
+
+			// data := binary.BigEndian.Unit64(key)
+			// log.Printf("key converted = %d", data)
+			// userMap[strconv.Atoi(key)] = &tempUser
+			return nil;
+			})
+		return nil
+		})
+	return nil
+}
 
 func main() {
 
 	appInit()
 
-	test()
+	// testJsonMarshall()
 
 	//Create http client
 	transCfg := &http.Transport{
