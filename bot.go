@@ -1,30 +1,28 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-	"errors"
-	"bytes"
-
-	"crypto/tls"
-	"net/http"
 
 	"github.com/boltdb/bolt"
 	tb "gopkg.in/tucnak/telebot.v2"
 )
 
+// Bot environment variable key
 const APP_ENV_DB_STORAGE = "BLUE_BOT_DB_STORAGE"
 const APP_ENV_BOT_TOKEN = "SIGNIN_BOT_TOKEN"
 
-
 type Step int
 
+// Signin step
 const (
 	stepToConfirmFulName Step = iota
 	stepToAskFullName
@@ -34,182 +32,22 @@ const (
 	stepDone
 )
 
+// user info definition
 type userInfo struct {
 	DisplayName       string
 	TosAgreed         bool
 	Subscription      bool
 	RegistrationStep  Step
 	LastSigninRequest time.Time
+	Sender            tb.User //for resend
 }
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 var userMap = make(map[int]*userInfo)
-
 var defaultDbStorage = "my.db"
 var defaultDbFileMode os.FileMode = 0600
 var defaultBucket = "userinfo"
-
-
-func testJsonMarshall(){
-	fmt.Printf("hello, world\n")
-    var user userInfo
-    user.DisplayName="test name"
-    user.TosAgreed=false
-    user.Subscription=true
-    user.RegistrationStep=stepToAskTos
-
-    log.Printf("User info step=%d displayName=%s tosAgreed=%s", user.RegistrationStep, user.DisplayName, user.TosAgreed)
-        
-    userBytes, err := json.Marshal(user)
-    if err == nil{
-    	os.Stdout.Write(userBytes)
-	}
-
-}
-
-func appInit(){
-	//Setup log
-	log.SetFlags(log.LstdFlags | log.Llongfile)
-
-	//Set env value
-	tempValue := os.Getenv(APP_ENV_DB_STORAGE)
-	if tempValue == ""{
-		os.Setenv(APP_ENV_DB_STORAGE, defaultDbStorage)
-	}
-	err := initDb()
-	if err != nil {
-		log.Fatal(err)
-	}
-	err = initDbBucket(defaultBucket)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	tempValue = os.Getenv(APP_ENV_BOT_TOKEN)
-	if tempValue == ""{
-		log.Fatal("I dont have the KEY to open the door! :(")
-	}
-
-	loadUserInfo(defaultBucket)
-}
-
-func initDb() (error) {
-	storage := os.Getenv(APP_ENV_DB_STORAGE)
-	log.Printf("InitDB: Initialize boltdb with storage %s!", storage)
-	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
-	if err != nil {
-		log.Fatal(err)
-	} else {
-		log.Printf("InitDB: DB is initialize successful to %s.", storage)
-	}
-	defer db.Close()
-	return err
-}
-
-func initDbBucket(bucket string) (error) {
-	storage := os.Getenv(APP_ENV_DB_STORAGE)
-	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	err = db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists([]byte(bucket))
-		if err != nil {
-			errStr := fmt.Errorf("Could not create bucket %s error: %s", bucket, err)
-			log.Print(errStr)
-			return errStr
-		}
-		return nil
-	})
-	defer db.Close()
-	return err
-}
-func updateUserInfo(user *userInfo, id int, bucket string) error {
-	storage := os.Getenv(APP_ENV_DB_STORAGE)
-	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	err = db.Update(func(tx *bolt.Tx) error {
-		bk := tx.Bucket([]byte(bucket))
-		log.Printf("User info step=%d displayName=%s tosAgreed=%s", user.RegistrationStep, user.DisplayName, user.TosAgreed)
-		userBytes, err := json.Marshal(user)
-		if err == nil {
-			err = bk.Put([]byte(strconv.Itoa(id)), []byte(userBytes))
-			if err == nil {
-				log.Printf("updateUserInfo: Insert user id=%d value=%s to db successfully!", id, userBytes)
-			}else{
-				log.Printf("updateUserInfo: Failure insert user id=%d value=%s to db!", id, userBytes)
-			}
-		}else{
-			log.Printf("updateUserInfo: Failure to jsonize user data with id=%d", id)
-		}
-		return nil
-	})
-
-	defer db.Close()
-	return err
-}
-/*
-*
-*get user info by id from boltdb
-*/
-func getUserInfo(id int, bucket string) (userInfo, error) {
-	storage := os.Getenv(APP_ENV_DB_STORAGE)
-	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
-	if err != nil {
-		log.Fatal(err)
-	}
-	var user userInfo
-	err = db.View(func(tx *bolt.Tx) error {
-		bk := tx.Bucket([]byte(bucket))
-		userBytes := bk.Get([]byte(strconv.Itoa(id)))
-
-		var users []userInfo
-		json.Unmarshal(userBytes, &users)
-		if len(users) > 1{
-			user = users[0]
-			return nil
-		}
-		errStr := "Not found info of user id=" + strconv.Itoa(id)
-		return errors.New(errStr)
-	})
-	return user, err
-}
-/*
-*load all user info from bolt db
-*/
-func loadUserInfo(bucket string) error {
-	log.Printf("loadUserInfo: loading user info")
-	storage := os.Getenv(APP_ENV_DB_STORAGE)
-	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
-	if err != nil {
-		log.Fatal(err)
-	}
-	// var allUsers []userInfo
-	err = db.View(func(tx *bolt.Tx) error {
-		bk := tx.Bucket([]byte(bucket))
-		bk.ForEach(func(key, value []byte) error{
-			log.Printf("Load user id=%s value=%s", key, value)
-			var tempUser userInfo
-			json.Unmarshal(value, &tempUser)
-
-			fmt.
-
-			log.Printf("key value %s -- ", stringbyte)
-
-			// data := binary.BigEndian.Unit64(key)
-			// log.Printf("key converted = %d", data)
-			// userMap[strconv.Atoi(key)] = &tempUser
-			return nil;
-			})
-		return nil
-		})
-	return nil
-}
 
 func main() {
 
@@ -244,11 +82,174 @@ func main() {
 	})
 
 	b.Handle("/signin", func(m *tb.Message) {
+		delete(userMap, m.Sender.ID)
 		log.Printf("Handle /signin command=%s", m.Text)
 		next(b, m)
 	})
 
+	//recall recent user, make a PING
+	for _, value := range userMap {
+		if value.RegistrationStep != stepDone {
+			msg := "Sorry, I have lost the conversation with you! So now we can continue!"
+			b.Send(&value.Sender, msg)
+			var message tb.Message
+			message.Sender = &value.Sender
+			next(b, &message)
+		}
+	}
+
 	b.Start()
+}
+
+// test json marshall
+func testJsonMarshall() {
+	fmt.Printf("hello, world\n")
+	var user userInfo
+	user.DisplayName = "test name"
+	user.TosAgreed = false
+	user.Subscription = true
+	user.RegistrationStep = stepToAskTos
+
+	log.Printf("User info step=%d displayName=%s tosAgreed=%s", user.RegistrationStep, user.DisplayName, user.TosAgreed)
+
+	userBytes, err := json.Marshal(user)
+	if err == nil {
+		os.Stdout.Write(userBytes)
+	}
+
+}
+
+/*
+**Set up app:
+*** log:
+*** db
+*** load user info
+ */
+func appInit() {
+	//Setup log
+	log.SetFlags(log.LstdFlags | log.Llongfile)
+
+	//Set env value
+	tempValue := os.Getenv(APP_ENV_DB_STORAGE)
+	if tempValue == "" {
+		os.Setenv(APP_ENV_DB_STORAGE, defaultDbStorage)
+	}
+	err := initDb()
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = initDbBucket(defaultBucket)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	tempValue = os.Getenv(APP_ENV_BOT_TOKEN)
+	if tempValue == "" {
+		log.Fatal("I dont have the KEY to open the door of Telegram Bot's house! :(")
+	}
+
+	loadUserInfo(defaultBucket)
+}
+
+/*
+* Init bolt db. Create storage if not done yet!
+ */
+func initDb() error {
+	storage := os.Getenv(APP_ENV_DB_STORAGE)
+	log.Printf("InitDB: Initialize boltdb with storage %s!", storage)
+	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	} else {
+		log.Printf("InitDB: DB is initialize successful to %s.", storage)
+	}
+	defer db.Close()
+	return err
+}
+
+/*
+* Init bucket database for store user info if not done yet!
+ */
+func initDbBucket(bucket string) error {
+	storage := os.Getenv(APP_ENV_DB_STORAGE)
+	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte(bucket))
+		if err != nil {
+			errStr := fmt.Errorf("Could not create bucket %s error: %s", bucket, err)
+			log.Print(errStr)
+			return errStr
+		}
+		return nil
+	})
+	defer db.Close()
+	return err
+}
+
+/*
+* Make update user info to db
+ */
+func updateUserInfo(user *userInfo, id int, bucket string) error {
+	storage := os.Getenv(APP_ENV_DB_STORAGE)
+	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		bk := tx.Bucket([]byte(bucket))
+		log.Printf("updateUserInfo: User info step=%d displayName=%s tosAgreed=%s", user.RegistrationStep, user.DisplayName, user.TosAgreed)
+		userBytes, err := json.Marshal(user)
+		if err == nil {
+			err = bk.Put([]byte(strconv.Itoa(id)), []byte(userBytes))
+			if err == nil {
+				log.Printf("updateUserInfo: Insert user id=%d value=%s to db successfully!", id, userBytes)
+			} else {
+				log.Printf("updateUserInfo: Failure insert user id=%d value=%s to db!", id, userBytes)
+			}
+		} else {
+			log.Printf("updateUserInfo: Failure to jsonize user data with id=%d", id)
+		}
+		return nil
+	})
+
+	defer db.Close()
+	return err
+}
+
+/*
+*Load all user info from bolt db
+ */
+func loadUserInfo(bucket string) error {
+	storage := os.Getenv(APP_ENV_DB_STORAGE)
+	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = db.View(func(tx *bolt.Tx) error {
+		bk := tx.Bucket([]byte(bucket))
+		bk.ForEach(func(key, value []byte) error {
+			var tempUser userInfo
+			json.Unmarshal(value, &tempUser)
+			keyStr := string(key)
+			keyInt, err := strconv.Atoi(keyStr)
+			if err != nil {
+				log.Printf("loadUserInfo: falsely parse data")
+			} else {
+				userMap[keyInt] = &tempUser
+				log.Printf("loadUserInfo: successfully parse data, insert user id=%d value=%s", keyInt, value)
+			}
+			return err
+		})
+		return err
+	})
+	defer db.Close()
+	return err
 }
 
 func randString(n int) string {
@@ -419,12 +420,13 @@ func handleReply(b *tb.Bot, m *tb.Message) {
 			informSignin(b, m)
 		}
 	} else {
+		log.Printf("handleReply: Not found user id=%d", m.Sender.ID)
 		informSignin(b, m)
 	}
 }
 
 func startRegistration(b *tb.Bot, m *tb.Message) {
-	newUserInfo := userInfo{RegistrationStep: stepToConfirmFulName}
+	newUserInfo := userInfo{RegistrationStep: stepToConfirmFulName, Sender: *m.Sender}
 	userMap[m.Sender.ID] = &newUserInfo
 	log.Printf("startRegistration: start Registration for user id=%d registrationStep=%d!", m.Sender.ID, newUserInfo.RegistrationStep)
 	updateUserInfo(userMap[m.Sender.ID], m.Sender.ID, defaultBucket)
