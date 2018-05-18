@@ -1,24 +1,28 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"crypto/tls"
-	"net/http"
-
 	"github.com/boltdb/bolt"
 	tb "gopkg.in/tucnak/telebot.v2"
 )
 
+// Bot environment variable key
+const APP_ENV_DB_STORAGE = "BLUE_BOT_DB_STORAGE"
+const APP_ENV_BOT_TOKEN = "SIGNIN_BOT_TOKEN"
+
 type Step int
 
+// Signin step
 const (
 	stepToConfirmFulName Step = iota
 	stepToAskFullName
@@ -28,36 +32,28 @@ const (
 	stepDone
 )
 
+// user info definition
 type userInfo struct {
-	displayName       string
-	tosAgreed         bool
-	subscription      bool
-	registrationStep  Step
-	lastSigninRequest time.Time
+	DisplayName       string
+	TosAgreed         bool
+	Subscription      bool
+	RegistrationStep  Step
+	LastSigninRequest time.Time
+	Sender            tb.User //for resend
 }
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 var userMap = make(map[int]*userInfo)
-var userBk = "userInfo"
-var userIdKey = "userId"
-var userDisplayNameKey = "displayName"
-var userTosAgreedBk = "tosAgreed"
-var userSubcriptionBk = "subcription"
-var userRegistrationStepBk = "registrationStep"
-var userLastSigninRequestBk = "lastSigninRequest"
+var defaultDbStorage = "my.db"
+var defaultDbFileMode os.FileMode = 0600
+var defaultBucket = "userinfo"
 
 func main() {
-	//Set env value
-	botToken := "SIGNIN_BOT_TOKEN"
-	os.Setenv(botToken, "xxxxxxxxxxxxx")
-	//Setup log
-	log.SetFlags(log.LstdFlags | log.Llongfile)
-	//db setup
-	dbStorage := "my.db"
-	db, err := initDb(dbStorage)
-	db, err = initDbBucket(db, userBk)
-	defer db.Close()
+
+	appInit()
+
+	// testJsonMarshall()
 
 	//Create http client
 	transCfg := &http.Transport{
@@ -65,7 +61,7 @@ func main() {
 	}
 	client := &http.Client{Transport: transCfg}
 	b, err := tb.NewBot(tb.Settings{
-		Token:  os.Getenv(botToken),
+		Token:  os.Getenv(APP_ENV_BOT_TOKEN),
 		Poller: &tb.LongPoller{Timeout: 10 * time.Second},
 		Client: client,
 	})
@@ -76,18 +72,184 @@ func main() {
 	}
 
 	b.Handle(tb.OnText, func(m *tb.Message) {
+		log.Printf("Handle onText=%s", m.Text)
 		handleReply(b, m)
 	})
 
 	b.Handle("/start", func(m *tb.Message) {
+		log.Printf("Handle /start command=%s", m.Text)
 		next(b, m)
 	})
 
 	b.Handle("/signin", func(m *tb.Message) {
+		delete(userMap, m.Sender.ID)
+		log.Printf("Handle /signin command=%s", m.Text)
 		next(b, m)
 	})
 
+	//recall recent user, make a PING
+	for _, value := range userMap {
+		if value.RegistrationStep != stepDone {
+			msg := "Sorry, I have lost the conversation with you! So now we can continue!"
+			b.Send(&value.Sender, msg)
+			var message tb.Message
+			message.Sender = &value.Sender
+			next(b, &message)
+		}
+	}
+
 	b.Start()
+}
+
+// test json marshall
+func testJsonMarshall() {
+	fmt.Printf("hello, world\n")
+	var user userInfo
+	user.DisplayName = "test name"
+	user.TosAgreed = false
+	user.Subscription = true
+	user.RegistrationStep = stepToAskTos
+
+	log.Printf("User info step=%d displayName=%s tosAgreed=%s", user.RegistrationStep, user.DisplayName, user.TosAgreed)
+
+	userBytes, err := json.Marshal(user)
+	if err == nil {
+		os.Stdout.Write(userBytes)
+	}
+
+}
+
+/*
+**Set up app:
+*** log:
+*** db
+*** load user info
+ */
+func appInit() {
+	//Setup log
+	log.SetFlags(log.LstdFlags | log.Llongfile)
+
+	//Set env value
+	tempValue := os.Getenv(APP_ENV_DB_STORAGE)
+	if tempValue == "" {
+		os.Setenv(APP_ENV_DB_STORAGE, defaultDbStorage)
+	}
+	err := initDb()
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = initDbBucket(defaultBucket)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	tempValue = os.Getenv(APP_ENV_BOT_TOKEN)
+	if tempValue == "" {
+		log.Fatal("I dont have the KEY to open the door of Telegram Bot's house! :(")
+	}
+
+	loadUserInfo(defaultBucket)
+}
+
+/*
+* Init bolt db. Create storage if not done yet!
+ */
+func initDb() error {
+	storage := os.Getenv(APP_ENV_DB_STORAGE)
+	log.Printf("InitDB: Initialize boltdb with storage %s!", storage)
+	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	} else {
+		log.Printf("InitDB: DB is initialize successful to %s.", storage)
+	}
+	defer db.Close()
+	return err
+}
+
+/*
+* Init bucket database for store user info if not done yet!
+ */
+func initDbBucket(bucket string) error {
+	storage := os.Getenv(APP_ENV_DB_STORAGE)
+	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte(bucket))
+		if err != nil {
+			errStr := fmt.Errorf("Could not create bucket %s error: %s", bucket, err)
+			log.Print(errStr)
+			return errStr
+		}
+		return nil
+	})
+	defer db.Close()
+	return err
+}
+
+/*
+* Make update user info to db
+ */
+func updateUserInfo(user *userInfo, id int, bucket string) error {
+	storage := os.Getenv(APP_ENV_DB_STORAGE)
+	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		bk := tx.Bucket([]byte(bucket))
+		log.Printf("updateUserInfo: User info step=%d displayName=%s tosAgreed=%s", user.RegistrationStep, user.DisplayName, user.TosAgreed)
+		userBytes, err := json.Marshal(user)
+		if err == nil {
+			err = bk.Put([]byte(strconv.Itoa(id)), []byte(userBytes))
+			if err == nil {
+				log.Printf("updateUserInfo: Insert user id=%d value=%s to db successfully!", id, userBytes)
+			} else {
+				log.Printf("updateUserInfo: Failure insert user id=%d value=%s to db!", id, userBytes)
+			}
+		} else {
+			log.Printf("updateUserInfo: Failure to jsonize user data with id=%d", id)
+		}
+		return nil
+	})
+
+	defer db.Close()
+	return err
+}
+
+/*
+*Load all user info from bolt db
+ */
+func loadUserInfo(bucket string) error {
+	storage := os.Getenv(APP_ENV_DB_STORAGE)
+	db, err := bolt.Open(storage, defaultDbFileMode, &bolt.Options{Timeout: 1 * time.Second})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = db.View(func(tx *bolt.Tx) error {
+		bk := tx.Bucket([]byte(bucket))
+		bk.ForEach(func(key, value []byte) error {
+			var tempUser userInfo
+			json.Unmarshal(value, &tempUser)
+			keyStr := string(key)
+			keyInt, err := strconv.Atoi(keyStr)
+			if err != nil {
+				log.Printf("loadUserInfo: falsely parse data")
+			} else {
+				userMap[keyInt] = &tempUser
+				log.Printf("loadUserInfo: successfully parse data, insert user id=%d value=%s", keyInt, value)
+			}
+			return err
+		})
+		return err
+	})
+	defer db.Close()
+	return err
 }
 
 func randString(n int) string {
@@ -99,9 +261,10 @@ func randString(n int) string {
 }
 
 func getFullName(m *tb.Message) string {
+	log.Printf("getFullName: from user id=%d", m.Sender.ID)
 	if user, ok := userMap[m.Sender.ID]; ok {
-		if user.displayName != "" {
-			return user.displayName
+		if user.DisplayName != "" {
+			return user.DisplayName
 		}
 	}
 	return fmt.Sprintf("%s %s", m.Sender.FirstName, m.Sender.LastName)
@@ -144,6 +307,8 @@ func sendfAndHideKeyboard(b *tb.Bot, m *tb.Message, text string, a ...interface{
 
 func next(b *tb.Bot, m *tb.Message) {
 	if user, ok := userMap[m.Sender.ID]; ok {
+		log.Printf("next: registrationStep=%d for User id=%d send msg=%s", user.RegistrationStep, m.Sender.ID, m.Text)
+		updateUserInfo(user, m.Sender.ID, defaultBucket)
 		funcArray := []func(*tb.Bot, *tb.Message){
 			confirmDisplayName,
 			askDisplayName,
@@ -151,7 +316,7 @@ func next(b *tb.Bot, m *tb.Message) {
 			askSubcription,
 			doCreateAccount,
 			sendSigninLink}
-		funcArray[user.registrationStep](b, m)
+		funcArray[user.RegistrationStep](b, m)
 	} else {
 		// registration
 		startRegistration(b, m)
@@ -160,7 +325,8 @@ func next(b *tb.Bot, m *tb.Message) {
 
 func sendSigninLink(b *tb.Bot, m *tb.Message) {
 	user := userMap[m.Sender.ID]
-	last := user.lastSigninRequest
+	last := user.LastSigninRequest
+	log.Printf("sendSigninLink: send to user id=%d lastSigninRequest=%d registrationStep=%d,", m.Sender.ID, last, user.RegistrationStep)
 	if !last.IsZero() {
 		elapsed := time.Now().Sub(last).Minutes()
 		if elapsed < 1.0 {
@@ -177,7 +343,7 @@ func sendSigninLink(b *tb.Bot, m *tb.Message) {
 		m.Sender.ID,
 	)
 	if err == nil {
-		user.lastSigninRequest = time.Now()
+		user.LastSigninRequest = time.Now()
 	}
 }
 
@@ -205,45 +371,46 @@ func isNo(text string) bool {
 
 func handleReply(b *tb.Bot, m *tb.Message) {
 	if user, ok := userMap[m.Sender.ID]; ok {
-		switch user.registrationStep {
+		log.Printf("handleReply: User id=%d with registrationStep=%d", m.Sender.ID, user.RegistrationStep)
+		switch user.RegistrationStep {
 		case stepToConfirmFulName:
 			if isYes(m.Text) {
-				user.displayName = fmt.Sprintf("%s %s", m.Sender.FirstName, m.Sender.LastName)
-				user.registrationStep = stepToAskTos
+				user.DisplayName = fmt.Sprintf("%s %s", m.Sender.FirstName, m.Sender.LastName)
+				user.RegistrationStep = stepToAskTos
 				next(b, m)
 			} else if isNo(m.Text) {
-				user.registrationStep = stepToAskFullName
+				user.RegistrationStep = stepToAskFullName
 				next(b, m)
 			} else {
 				next(b, m)
 			}
 		case stepToAskFullName:
-			user.displayName = strings.Title(strings.TrimSpace(m.Text))
-			user.registrationStep = stepToAskTos
+			user.DisplayName = strings.Title(strings.TrimSpace(m.Text))
+			user.RegistrationStep = stepToAskTos
 			next(b, m)
 		case stepToAskTos:
 			if isYes(m.Text) {
-				user.tosAgreed = true
-				user.registrationStep = stepToAskSubscription
+				user.TosAgreed = true
+				user.RegistrationStep = stepToAskSubscription
 				next(b, m)
 			} else {
 				next(b, m)
 			}
 		case stepToAskSubscription:
 			if isYes(m.Text) {
-				user.subscription = true
-				user.registrationStep = stepToCreateAcount
+				user.Subscription = true
+				user.RegistrationStep = stepToCreateAcount
 				next(b, m)
 			} else if isNo(m.Text) {
-				user.subscription = false
-				user.registrationStep = stepToCreateAcount
+				user.Subscription = false
+				user.RegistrationStep = stepToCreateAcount
 				next(b, m)
 			} else {
 				next(b, m)
 			}
 		case stepToCreateAcount:
 			// TODO: should done earlier, from the time acount created
-			user.registrationStep = stepDone
+			user.RegistrationStep = stepDone
 			if isYes(m.Text) {
 				sendSigninLink(b, m)
 			} else {
@@ -253,30 +420,36 @@ func handleReply(b *tb.Bot, m *tb.Message) {
 			informSignin(b, m)
 		}
 	} else {
+		log.Printf("handleReply: Not found user id=%d", m.Sender.ID)
 		informSignin(b, m)
 	}
 }
 
 func startRegistration(b *tb.Bot, m *tb.Message) {
-	newUserInfo := userInfo{registrationStep: stepToConfirmFulName}
+	newUserInfo := userInfo{RegistrationStep: stepToConfirmFulName, Sender: *m.Sender}
 	userMap[m.Sender.ID] = &newUserInfo
-
+	log.Printf("startRegistration: start Registration for user id=%d registrationStep=%d!", m.Sender.ID, newUserInfo.RegistrationStep)
+	updateUserInfo(userMap[m.Sender.ID], m.Sender.ID, defaultBucket)
 	confirmDisplayName(b, m)
 }
 
 func confirmDisplayName(b *tb.Bot, m *tb.Message) {
+	log.Printf("confirmDisplayName: send confirm display name to user id=%d", m.Sender.ID)
 	sendYesNof(b, m, "Would you like your display name to be \"%s\"?", getFullName(m))
 }
 
 func askDisplayName(b *tb.Bot, m *tb.Message) {
+	log.Printf("askDisplayName: ask display name to user id=%d", m.Sender.ID)
 	sendAndHideKeyboard(b, m, "What would you like your display name to be?")
 }
 
 func askTos(b *tb.Bot, m *tb.Message) {
+	log.Printf("askTos: send term service to user id=%d", m.Sender.ID)
 	sendYesNo(b, m, "Do you agree with our Term of Service? You could view the PDF version here https://home.kyber.network/assets/tac.pdf")
 }
 
 func askSubcription(b *tb.Bot, m *tb.Message) {
+	log.Printf("askSubcription: ask user id=%d", m.Sender.ID)
 	sendYesNo(b, m, "Would you like to receive important updates regarding your account?")
 }
 
@@ -290,105 +463,16 @@ func boolToYesNo(value bool) string {
 
 func doCreateAccount(b *tb.Bot, m *tb.Message) {
 	user := userMap[m.Sender.ID]
+	log.Printf("doCreateAccount: user id=%d name=%s subcribe=%s", m.Sender.ID, user.DisplayName, boolToYesNo(user.Subscription))
 	text := fmt.Sprintf(
 		"Hurrah! your account has been created!\n\nDisplay Name: %s\nTerm of Service: Agreed\nSubscribe to Updates: %s\n\nWould you like to sign-in Kyber Network now?",
-		user.displayName,
-		boolToYesNo(user.subscription))
+		user.DisplayName,
+		boolToYesNo(user.Subscription))
 
 	sendYesNo(b, m, text)
 }
 
 func informSignin(b *tb.Bot, m *tb.Message) {
+	log.Printf("informSignin: send inform msg to user id=%d", m.Sender.ID)
 	send(b, m, "To sign-in Kyber Network, please type /signin")
-}
-
-func initDb(storage string) (*bolt.DB, error) {
-	log.Printf("Initialize boltdb!")
-	db, err := bolt.Open(storage, 0600, nil)
-	if err != nil {
-		log.Fatal(err)
-	} else {
-		log.Printf("DB is initialize successful to %s.", storage)
-	}
-	return db, err
-}
-
-func initDbBucket(db *bolt.DB, bucket string) (*bolt.DB, error) {
-	err := db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists([]byte(bucket))
-		if err != nil {
-			errStr := fmt.Errorf("Could not create bucket %s error: %s", bucket, err)
-			log.Print(errStr)
-			return errStr
-		}
-		/*
-		   _, err = rootBk.CreateBucketIfNotExists([]byte(userDisplayNameBk))
-		   if err != nil {
-		           errStr := fmt.Errorf("Could not create bucket %s error: %s", userDisplayNameBk, err)
-		           log.Print(errStr)
-		           return errStr
-		   }
-
-		   _, err = rootBk.CreateBucketIfNotExists([]byte(userTosAgreedBk))
-
-		   if err != nil {
-		           errStr := fmt.Errorf("Could not create bucket %s error: %s", userTosAgreedBk, err)
-		           log.Print(errStr)
-		           return errStr
-		   }
-
-		   _, err = rootBk.CreateBucketIfNotExists([]byte(userSubcriptionBk))
-
-		   if err != nil {
-		           errStr := fmt.Errorf("Could not create bucket %s error: %s", userSubcriptionBk, err)
-		           log.Print(errStr)
-		           return errStr
-		   }
-
-		   _, err = rootBk.CreateBucketIfNotExists([]byte(userRegistrationStepBk))
-
-		   if err != nil {
-		           errStr := fmt.Errorf("Could not create bucket %s error: %s", userRegistrationStepBk, err)
-		           log.Print(errStr)
-		           return errStr
-		   }
-
-		   _, err = rootBk.CreateBucketIfNotExists([]byte(userLastSigninRequestBk))
-
-		   if err != nil {
-		           errStr := fmt.Errorf("Could not create bucket %s error: %s", userLastSigninRequestBk, err)
-		           log.Print(errStr)
-		           return errStr
-		   }
-		*/
-		return nil
-	})
-	return db, err
-}
-func updateUserInfo(db *bolt.DB, user *userInfo, id int, bucket string) error {
-	err := db.Update(func(tx *bolt.Tx) error {
-		bk := tx.Bucket([]byte(bucket))
-		userBytes, err := json.Marshal(user)
-		if err == nil {
-			err = bk.Put([]byte(strconv.Itoa(id)), []byte(userBytes))
-			if err == nil {
-				log.Printf("Insert user id=%i to db successfully!", id)
-			}
-		}
-		return nil
-	})
-	return err
-}
-func getUserInfo(db *bolt.DB, id int, bucket string) userInfo {
-	userBytes := db.View(func(tx *bolt.Tx) (value []byte) {
-		bk := tx.Bucket([]byte(bucket))
-		value = bk.Get([]byte(strconv.Itoa(id)))
-		return value
-	})
-	var users []userInfo
-	json.Unmarshal(userBytes, &users)
-	if len(users) > 1 {
-		return users[0]
-	}
-	return nil
 }
