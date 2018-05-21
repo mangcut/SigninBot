@@ -82,7 +82,6 @@ func main() {
 	})
 
 	b.Handle("/signin", func(m *tb.Message) {
-		delete(userMap, m.Sender.ID)
 		log.Printf("Handle /signin command=%s", m.Text)
 		next(b, m)
 	})
